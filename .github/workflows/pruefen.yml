@@ -6,6 +6,7 @@ name: erreichbarkeit
 on:
   schedule:
     - cron: '*/10 * * * *'
+    - cron: '5 4 * * 1' # montags: aktiv halten
   workflow_dispatch:
 
 permissions: {}
@@ -15,6 +16,7 @@ concurrency:
 
 jobs:
   pruefen:
+    if: github.event.schedule != '5 4 * * 1'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -45,3 +47,17 @@ jobs:
             if [ -z "$offen" ]; then gh issue create --title 'Server nicht erreichbar' --label ausfall --body "Drei Versuche fehlgeschlagen: $jetzt UTC $MELDEN" >/dev/null; fi
             exit 1
           fi
+
+  # GitHub schaltet Zeitpläne in öffentlichen Repos nach 60 Tagen ohne Commit ab.
+  # Erneutes Aktivieren setzt die Frist zurück; schlägt es fehl, meldet GitHub den Lauf als fehlgeschlagen.
+  aktiv-halten:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '5 4 * * 1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - name: Zeitplan aktiv halten
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/pruefen.yml/enable" --silent && echo 'aktiv'
