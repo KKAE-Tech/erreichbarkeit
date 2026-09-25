@@ -23,6 +23,7 @@ jobs:
       - name: Server prüfen
         env:
           ZIEL: ${{ secrets.ZIEL_URL }}
+          MELDEN: ${{ vars.MELDEN }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
@@ -41,6 +42,6 @@ jobs:
             if [ -n "$offen" ]; then gh issue close "$offen" --comment "Wieder erreichbar: $jetzt UTC" >/dev/null; fi
           else
             echo 'nicht erreichbar'
-            if [ -z "$offen" ]; then gh issue create --title 'Server nicht erreichbar' --label ausfall --body "Drei Versuche fehlgeschlagen: $jetzt UTC" >/dev/null; fi
+            if [ -z "$offen" ]; then gh issue create --title 'Server nicht erreichbar' --label ausfall --body "Drei Versuche fehlgeschlagen: $jetzt UTC $MELDEN" >/dev/null; fi
             exit 1
           fi
