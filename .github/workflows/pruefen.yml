@@ -1,0 +1,46 @@
+# Prüft alle 10 Minuten, ob der Server antwortet.
+# Die Adresse steht nur im Secret ZIEL_URL; Log und Issue nennen sie nie.
+# Keine fremden Actions, keine Auslöser durch Pull Requests (Forks bekommen weder Lauf noch Secret).
+name: erreichbarkeit
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: erreichbarkeit
+
+jobs:
+  pruefen:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Server prüfen
+        env:
+          ZIEL: ${{ secrets.ZIEL_URL }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ok=0
+          for versuch in 1 2 3; do
+            # nur der Statuscode, Fehlermeldungen von curl (enthalten den Hostnamen) werden verworfen
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 --proto '=https' "$ZIEL" 2>/dev/null || true)
+            if [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 400 ]; then ok=1; break; fi
+            if [ "$versuch" -lt 3 ]; then sleep 60; fi
+          done
+          # Label „ausfall“ können Außenstehende nicht setzen – ein fremdes Issue kann die Warnung nicht unterdrücken
+          offen=$(gh issue list --state open --label ausfall --json number --jq '.[0].number // empty')
+          jetzt=$(date -u '+%Y-%m-%d %H:%M')
+          if [ "$ok" = 1 ]; then
+            echo 'erreichbar'
+            if [ -n "$offen" ]; then gh issue close "$offen" --comment "Wieder erreichbar: $jetzt UTC" >/dev/null; fi
+          else
+            echo 'nicht erreichbar'
+            if [ -z "$offen" ]; then gh issue create --title 'Server nicht erreichbar' --label ausfall --body "Drei Versuche fehlgeschlagen: $jetzt UTC" >/dev/null; fi
+            exit 1
+          fi
