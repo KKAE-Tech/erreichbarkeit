@@ -8,6 +8,13 @@ on:
     - cron: '*/10 * * * *'
     - cron: '5 4 * * 1' # montags: aktiv halten
   workflow_dispatch:
+    inputs:
+      probe:
+        # Probealarm (T-BET-09): nichts wird verstellt, also nichts zu vergessen – zweimal nacheinander starten gibt den
+        # Alarm mit Erwähnung, der nächste planmäßige Lauf findet alles erreichbar und schließt das Issue von selbst
+        description: 'Probealarm: ein erfundenes Ziel zählt in diesem Lauf als Fehlschlag'
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -28,6 +35,7 @@ jobs:
           MELDEN: ${{ vars.MELDEN }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          PROBE: ${{ inputs.probe }}
         run: |
           # jedes Ziel für sich, alle gleichzeitig: ist der ganze Server weg, dauert der Lauf trotzdem nur gut 2 Minuten
           # (nacheinander wären es bei 9 Zielen 18 Minuten – der Lauf bräche ab, bevor er warnt)
@@ -45,11 +53,14 @@ jobs:
               | openssl x509 -noout -checkend 1209600 >/dev/null 2>&1; then ok=0; fi
             echo "$ok" > "$ergebnis/$1"
           }
+          ziele=$ZIELE
+          # Probealarm: ein erfundenes Ziel (die Endung .invalid gibt es nie) zählt nur in diesem Lauf als Fehlschlag
+          if [ "${PROBE:-}" = true ]; then ziele+=$'\n''https://probealarm.invalid/'; fi
           ergebnis=$(mktemp -d); n=0
           while IFS= read -r ziel; do
             ziel=${ziel%$'\r'}; [ -z "$ziel" ] && continue
             n=$((n + 1)); pruefe "$n" "$ziel" &
-          done <<< "$ZIELE"
+          done <<< "$ziele"
           wait
           fehler=()
           for i in $(seq 1 "$n"); do
@@ -67,6 +78,7 @@ jobs:
             exit 0
           fi
           liste="Ziel ${fehler[*]}"
+          if [ "${PROBE:-}" = true ]; then liste+=' – Probealarm, der nächste planmäßige Lauf schließt dieses Issue'; fi
           if [ -z "$ausfall" ]; then
             if [ -n "$verdacht" ]; then # zweiter Fehlschlag in Folge → Alarm mit Erwähnung beider Gründer (NFA-BET-009)
               gh issue edit "$verdacht" --add-label ausfall --remove-label verdacht >/dev/null
