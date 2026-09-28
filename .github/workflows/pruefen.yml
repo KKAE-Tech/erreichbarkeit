@@ -1,5 +1,5 @@
-# Prüft alle 10 Minuten, ob der Server antwortet.
-# Die Adresse steht nur im Secret ZIEL_URL; Log und Issue nennen sie nie.
+# Prüft alle 10 Minuten die öffentlichen Adressen (Secret ZIEL_URLS, eine je Zeile); zwei Fehlschläge in Folge melden
+# beide Gründer. Log und Issue nennen nur die Nummer eines Ziels, nie seine Adresse.
 # Keine fremden Actions, keine Auslöser durch Pull Requests (Forks bekommen weder Lauf noch Secret).
 name: erreichbarkeit
 
@@ -18,35 +18,64 @@ jobs:
   pruefen:
     if: github.event.schedule != '5 4 * * 1'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 8
     permissions:
       issues: write
     steps:
-      - name: Server prüfen
+      - name: Adressen prüfen
         env:
-          ZIEL: ${{ secrets.ZIEL_URL }}
+          ZIELE: ${{ secrets.ZIEL_URLS }}
           MELDEN: ${{ vars.MELDEN }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          ok=0
-          for versuch in 1 2 3; do
-            # nur der Statuscode, Fehlermeldungen von curl (enthalten den Hostnamen) werden verworfen
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 --proto '=https' "$ZIEL" 2>/dev/null || true)
-            if [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 400 ]; then ok=1; break; fi
-            if [ "$versuch" -lt 3 ]; then sleep 60; fi
+          # jedes Ziel für sich, alle gleichzeitig: ist der ganze Server weg, dauert der Lauf trotzdem nur gut 2 Minuten
+          # (nacheinander wären es bei 9 Zielen 18 Minuten – der Lauf bräche ab, bevor er warnt)
+          pruefe() { # Nummer Adresse → Datei mit 1 (antwortet, Zertifikat noch mindestens 14 Tage gültig) oder 0
+            local ok=0 code host versuch
+            for versuch in 1 2 3; do
+              # der Server antwortet überhaupt: 2xx–4xx (Umleitung zur Anmeldung, 401, 403 sind in Ordnung), 5xx oder
+              # keine Antwort nicht; Meldungen von curl enthalten den Hostnamen und werden verworfen
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 --proto '=https' "$2" 2>/dev/null || true)
+              if [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 500 ]; then ok=1; break; fi
+              if [ "$versuch" -lt 3 ]; then sleep 30; fi
+            done
+            host=$(printf '%s' "$2" | sed -E 's#^https://([^/:]+).*#\1#')
+            if [ "$ok" = 1 ] && ! echo | timeout 20 openssl s_client -connect "$host:443" -servername "$host" 2>/dev/null \
+              | openssl x509 -noout -checkend 1209600 >/dev/null 2>&1; then ok=0; fi
+            echo "$ok" > "$ergebnis/$1"
+          }
+          ergebnis=$(mktemp -d); n=0
+          while IFS= read -r ziel; do
+            ziel=${ziel%$'\r'}; [ -z "$ziel" ] && continue
+            n=$((n + 1)); pruefe "$n" "$ziel" &
+          done <<< "$ZIELE"
+          wait
+          fehler=()
+          for i in $(seq 1 "$n"); do
+            if [ "$(cat "$ergebnis/$i" 2>/dev/null)" = 1 ]; then echo "Ziel $i: erreichbar"
+            else echo "Ziel $i: nicht erreichbar oder Zertifikat unter 14 Tagen"; fehler+=("$i"); fi
           done
-          # Label „ausfall“ können Außenstehende nicht setzen – ein fremdes Issue kann die Warnung nicht unterdrücken
-          offen=$(gh issue list --state open --label ausfall --json number --jq '.[0].number // empty')
+          if [ "$n" = 0 ]; then echo 'keine Ziele – Secret ZIEL_URLS fehlt oder ist leer'; fehler+=(0); fi
+          # „verdacht“ und „ausfall“ können Außenstehende nicht setzen – ein fremdes Issue kann keine Warnung unterdrücken
+          ausfall=$(gh issue list --state open --label ausfall --json number --jq '.[0].number // empty')
+          verdacht=$(gh issue list --state open --label verdacht --json number --jq '.[0].number // empty')
           jetzt=$(date -u '+%Y-%m-%d %H:%M')
-          if [ "$ok" = 1 ]; then
-            echo 'erreichbar'
-            if [ -n "$offen" ]; then gh issue close "$offen" --comment "Wieder erreichbar: $jetzt UTC" >/dev/null; fi
-          else
-            echo 'nicht erreichbar'
-            if [ -z "$offen" ]; then gh issue create --title 'Server nicht erreichbar' --label ausfall --body "Drei Versuche fehlgeschlagen: $jetzt UTC $MELDEN" >/dev/null; fi
-            exit 1
+          if [ ${#fehler[@]} = 0 ]; then
+            if [ -n "$ausfall" ]; then gh issue close "$ausfall" --comment "Wieder alles erreichbar: $jetzt UTC" >/dev/null; fi
+            if [ -n "$verdacht" ]; then gh issue close "$verdacht" --comment "Nur ein einzelner Fehlschlag: $jetzt UTC" >/dev/null; fi
+            exit 0
           fi
+          liste="Ziel ${fehler[*]}"
+          if [ -z "$ausfall" ]; then
+            if [ -n "$verdacht" ]; then # zweiter Fehlschlag in Folge → Alarm mit Erwähnung beider Gründer (NFA-BET-009)
+              gh issue edit "$verdacht" --add-label ausfall --remove-label verdacht >/dev/null
+              gh issue comment "$verdacht" --body "Zweiter Fehlschlag in Folge ($liste): $jetzt UTC $MELDEN" >/dev/null
+            else
+              gh issue create --title 'Nicht erreichbar' --label verdacht --body "Erster Fehlschlag ($liste): $jetzt UTC" >/dev/null
+            fi
+          fi
+          exit 1
 
   # GitHub schaltet Zeitpläne in öffentlichen Repos nach 60 Tagen ohne Commit ab.
   # Erneutes Aktivieren setzt die Frist zurück; schlägt es fehl, meldet GitHub den Lauf als fehlgeschlagen.
